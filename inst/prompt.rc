@@ -1,0 +1,47 @@
+
+fn prompt {
+	def=()
+	hide=()
+	if(~ $1 -d && ! ~ $#* 1){
+		def=$2
+		shift
+		shift
+	}
+	if(~ $1 -h && ! ~ $#* 1){
+		hide=$2
+		shift
+		shift
+	}
+	if(~ $1 -w && ! ~ $#* 1){
+		shift
+		shift
+	}
+	pr=$1
+	shift
+	opts=($*)
+
+	echo $pr >>/tmp/prompts.asked
+	asked=`{awk -v 'q='^$pr '$0 == q { n++ } END { print n }' /tmp/prompts.asked}
+	if(! ~ $asked 1 2 3){
+		echo '9front-build: FAILED: asked again and again: '^$pr >[1=2]
+		echo $pr >/tmp/prompt.failed
+		exit 'prompt repeated'
+	}
+
+	rd=`{awk -F'	' -v 'q='^$pr '$1 == q { print $2; exit }' $answers}
+	if(~ $#rd 0){
+		echo '9front-build: FAILED: no answer for: '^$pr^' [default: '^$"def^'] [options: '^$"opts^']' >[1=2]
+		echo $pr >/tmp/prompt.failed
+		exit 'no answer'
+	}
+	rd=$"rd
+
+	if(! ~ $#opts 0 && ! ~ $rd $opts $hide){
+		echo '9front-build: FAILED: answer '^$rd^' for '^$pr^' is not one of: '^$"opts >[1=2]
+		echo $pr >/tmp/prompt.failed
+		exit 'bad answer'
+	}
+
+	echo '9front-build: '^$pr^': '^$rd >[1=2]
+	echo -n $rd >/env/rd
+}

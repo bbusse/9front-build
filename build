@@ -1,0 +1,167 @@
+#!/usr/bin/env bash
+#
+# SPDX-FileCopyrightText: Björn Busse <bj.rn@baerlin.eu>
+# SPDX-License-Identifier: BSD-3-Clause
+#
+
+set -euo pipefail
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/qemu.sh
+source "${here}/lib/qemu.sh"
+
+version="${NINEFRONT_VERSION:-11952}"
+iso_sha256="${NINEFRONT_ISO_SHA256:-59ba79f1304f02c1aae573b337fa2569fc78027ce8e4c2056c4117e971025b91}"
+repo_url="${NINEFRONT_REPO_URL:-https://9front.org/iso}"
+image_size_mib="${IMAGE_SIZE_MIB:-4096}"
+work="${WORK_DIR:-${PWD}/work}"
+out="${OUT:-${PWD}/9front-amd64.img}"
+boot_timeout="${BOOT_TIMEOUT:-600}"
+build_timeout="${BUILD_TIMEOUT:-5400}"
+
+iso_gz="9front-${version}.amd64.iso.gz"
+iso="${work}/9front-${version}.amd64.iso"
+
+export MTOOLS_SKIP_CHECK=1
+
+log() {
+    printf '9front-build: %s\n' "$*" >&2
+}
+
+die() {
+    log "$*"
+    exit 1
+}
+
+need() {
+    local c
+    for c in "$@"; do
+        command -v "${c}" >/dev/null 2>&1 || die "missing ${c}"
+    done
+}
+
+fetch_iso() {
+    mkdir -p "${work}"
+
+    if [ ! -f "${work}/${iso_gz}" ]; then
+        log "fetching ${repo_url}/${iso_gz}"
+        curl -sS --fail -L -o "${work}/${iso_gz}.part" "${repo_url}/${iso_gz}"
+        mv "${work}/${iso_gz}.part" "${work}/${iso_gz}"
+    fi
+
+    log "verifying ${iso_gz}"
+    printf '%s  %s\n' "${iso_sha256}" "${iso_gz}" >"${work}/${iso_gz}.sha256"
+    if ! (cd "${work}" && sha256sum -c --quiet "${iso_gz}.sha256"); then
+        die "checksum mismatch for ${iso_gz}, set NINEFRONT_ISO_SHA256 along with NINEFRONT_VERSION"
+    fi
+
+    if [ ! -f "${iso}" ]; then
+        log "decompressing ${iso_gz}"
+        gzip -d -k -c "${work}/${iso_gz}" >"${iso}.part"
+        mv "${iso}.part" "${iso}"
+    fi
+}
+
+make_boot_disk() {
+    local stage
+    stage="${work}/stage"
+    rm -rf "${stage}"
+    mkdir -p "${stage}"
+
+    mkdir -p "${stage}/386" "${stage}/amd64"
+    xorriso -osirrox on -indev "${iso}" \
+        -extract /386/bootx64.efi "${stage}/386/bootx64.efi" \
+        -extract /amd64/9pc64 "${stage}/amd64/9pc64" 2>/dev/null ||
+        die "found no 386/bootx64.efi and amd64/9pc64 on ${iso}"
+
+    cat >"${stage}/plan9.ini" <<EOF
+bootfile=/9pc64
+console=0
+cdboot=yes
+nobootprompt=local!/dev/sdE0/linuxdata
+user=glenda
+EOF
+
+    local esp
+    esp="${work}/boot-esp.img"
+    rm -f "${esp}"
+    mkfs.vfat -C -n BUILD "${esp}" $((62 * 1024)) >/dev/null
+    mmd -i "${esp}" ::/EFI ::/EFI/BOOT ::/inst
+    mcopy -i "${esp}" "${stage}/386/bootx64.efi" ::/EFI/BOOT/BOOTX64.EFI
+    mcopy -i "${esp}" "${stage}/amd64/9pc64" ::/9pc64
+    mcopy -i "${esp}" "${stage}/plan9.ini" ::/plan9.ini
+    mcopy -i "${esp}" "${here}/inst/run.rc" "${here}/inst/prompt.rc" "${here}/inst/answers" ::/inst/
+
+    local iso_mib
+    iso_mib=$((($(wc -c <"${iso}") + 1048575) / 1048576))
+
+    boot_disk="${work}/boot.img"
+    rm -f "${boot_disk}"
+    truncate -s "$((64 + iso_mib + 1))M" "${boot_disk}"
+    sgdisk -n 1:2048:+62M -t 1:EF00 \
+        -n "2:$((64 * 2048)):+${iso_mib}M" -t 2:8300 "${boot_disk}" >/dev/null
+    dd if="${esp}" of="${boot_disk}" bs=1M seek=1 conv=notrunc status=none
+    dd if="${iso}" of="${boot_disk}" bs=1M seek=64 conv=notrunc status=none
+}
+
+show_console() {
+    printf '%s\n' '----- 9front console -----'
+    serial_text
+    printf '\n%s\n' '----- end 9front console -----'
+}
+
+run_install() {
+    rm -f "${out}"
+    truncate -s "${image_size_mib}M" "${out}"
+
+    local disks=()
+    mapfile -t -O "${#disks[@]}" disks < <(qemu_disk 0 "${boot_disk}")
+    mapfile -t -O "${#disks[@]}" disks < <(qemu_disk 1 "${out}")
+
+    log "booting the ${version} live system ($(qemu_accel))"
+    qemu_start "${work}/qemu" "${disks[@]}"
+    trap 'qemu_stop' EXIT
+
+    if ! wait_for 'term% ' "${boot_timeout}"; then
+        show_console
+        die "the live system did not reach a shell within ${boot_timeout}s"
+    fi
+
+    local from
+    from="$(serial_size)"
+    log "running inst/run.rc"
+    send_line 'test -e /srv/dos || dossrv; mount -c /srv/dos /n/build /dev/sdE0/esp && rc /n/build/inst/run.rc'
+
+    if ! wait_for '9front-build: (done|FAILED)' "${build_timeout}" "${from}"; then
+        show_console
+        die "the install did not finish within ${build_timeout}s"
+    fi
+    if tail -c "+$((from + 1))" "${SERIAL_LOG}" | grep -aq '9front-build: FAILED'; then
+        show_console
+        die "the install failed"
+    fi
+
+    if ! wait_for_exit 600; then
+        show_console
+        die "the live system did not halt after the install"
+    fi
+    qemu_stop
+    trap - EXIT
+    show_console
+}
+
+check_image() {
+    local table
+    table="$(sgdisk -p "${out}")"
+    printf '%s\n' "${table}"
+    grep -q ' EF00 ' <<<"${table}" || die "${out} has no EFI system partition"
+    grep -q ' 3900 ' <<<"${table}" || die "${out} has no Plan 9 partition"
+}
+
+need curl sha256sum gzip xorriso mkfs.vfat mmd mcopy sgdisk truncate dd qemu-system-x86_64
+
+fetch_iso
+make_boot_disk
+run_install
+check_image
+log "built ${out}"

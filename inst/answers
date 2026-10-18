@@ -1,0 +1,14 @@
+File system	gefs
+Disk to partition	sdE1
+Install mbr or gpt	gpt
+Plan 9 partition to subdivide	/dev/sdE1/plan9
+Use esp as 9fat?	yes
+Gefs partition	/dev/sdE1/fs
+Ream the filesystem?	yes
+Distribution disk	/
+Location of archives	/
+Time Zone	GMT
+Plan 9 FAT partition	/dev/sdE1/esp
+Initialize FAT on EFI system partition	yes
+Install the Plan 9 master boot record	no
+Mark the Plan 9 partition active	no

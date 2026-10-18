@@ -1,0 +1,67 @@
+#!/bin/rc
+
+rfork e
+
+build=/n/build/inst
+answers=$build/answers
+rootdisk=sdE0
+steps=(configfs partdisk prepdisk mountfs mountdist copydist tzsetup bootsetup)
+
+fn fail {
+	echo '9front-build: FAILED: '^$"*
+	exit failed
+}
+
+fn writeini {
+	{
+		echo 'bootfile=9pc64'
+		echo 'bootargs=local!/dev/'^$rootdisk^'/fs '^$"fsflags
+		echo 'nobootprompt=local!/dev/'^$rootdisk^'/fs '^$"fsflags
+		echo 'console=0'
+		echo 'user='^$user
+	} >/tmp/plan9.ini
+}
+
+if(! syscall create /tmp/xxx 1 0666 >[2]/dev/null)
+	ramfs
+rm -f /tmp/xxx /tmp/vars /tmp/prompts.asked /tmp/prompt.failed /tmp/plan9.ini /tmp/copydone
+
+cat /rc/bin/inst/defs $build/prompt.rc >/tmp/defs || fail cannot write /tmp/defs
+bind /tmp/defs /rc/bin/inst/defs || fail cannot bind /tmp/defs
+
+cd /bin/inst
+. ./defs
+
+textinst=1
+export textinst
+rm -f /srv/log
+echo 2 >/srv/log
+log `{date} 9front-build started
+
+for(s in $steps){
+	echo '9front-build: === '^$s^' ==='
+	switch($s){
+	case partdisk prepdisk
+		{echo w; echo q} | ./$s go
+	case *
+		./$s go </dev/null
+	}
+	if(test -f /tmp/prompt.failed)
+		fail $s: `{cat /tmp/prompt.failed}
+	coherence
+
+	if(~ $s mountfs)
+		writeini
+
+	$s=done
+	export $s
+	./$s checkdone </dev/null
+	coherence
+	if(! ~ $$s done)
+		fail $s is $$s after go
+}
+
+echo '9front-build: plan9.ini:'
+cat /tmp/plan9.ini
+echo '9front-build: done'
+./finish go
