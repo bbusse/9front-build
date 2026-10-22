@@ -1,0 +1,105 @@
+name: Build 9front
+
+on:
+  push:
+    paths-ignore:
+      - '**.md'
+    branches:
+      - '**'
+    tags:
+      - 'rc-*'
+      - 'release-*'
+  pull_request:
+    paths-ignore:
+      - '**.md'
+  workflow_dispatch:
+
+jobs:
+  # Both arches install from the amd64 live system under KVM; the arm64
+  # image takes its binaries from 9front's arm64 qcow2 and gets a patched
+  # 9qemu and bootaa64.efi built on the way
+  build:
+    name: Build 9front ${{ matrix.release }} (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        release: ["11952"]
+        arch: [amd64, arm64]
+    env:
+      ARCH: ${{ matrix.arch }}
+      NINEFRONT_VERSION: ${{ matrix.release }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install build dependencies
+        run: |
+          set -eu
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            dosfstools gdisk mtools ovmf patch qemu-system-x86 qemu-utils xorriso
+
+      - name: Enable KVM
+        uses: bbusse/github-workflows/.github/actions/enable-kvm@dev
+
+      - name: Build the image
+        run: ./build
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: 9front-${{ matrix.release }}-${{ matrix.arch }}-${{ github.run_number }}
+          path: 9front-${{ matrix.arch }}.img
+          if-no-files-found: error
+
+  test-boot:
+    name: Boot 9front image under qemu
+    needs: build
+    if: ${{ !cancelled() }}
+    strategy:
+      fail-fast: false
+      matrix:
+        release: ["11952"]
+        arch: [amd64, arm64]
+    uses: bbusse/github-workflows/.github/workflows/run-tests-bash-unit.yml@dev
+    with:
+      test_files: tests/test_boot_9front.sh
+      install_qemu_deps: true
+      enable_kvm: true
+      test_arch: ${{ matrix.arch }}
+      use_arm_runner: ${{ matrix.arch == 'arm64' }}
+      download_artifact_name: 9front-${{ matrix.release }}-${{ matrix.arch }}-${{ github.run_number }}
+      disk_image: 9front-${{ matrix.arch }}.img
+
+  # release.yml publishes every file of the 9front-release-* artifacts as
+  # <file>-<version> and <file>-latest, the way linux-kernel-build ships its
+  # kernels. Packaged once the image has booted, for the rc-* and release-*
+  # tags make rc and make release push from ci
+  package:
+    name: Package 9front ${{ matrix.release }} (${{ matrix.arch }})
+    needs: test-boot
+    if: ${{ startsWith(github.ref, 'refs/tags/') }}
+    strategy:
+      matrix:
+        release: ["11952"]
+        arch: [amd64, arm64]
+    uses: bbusse/github-workflows/.github/workflows/package-release-artifact.yml@dev
+    with:
+      artifact_name: 9front-${{ matrix.release }}-${{ matrix.arch }}-${{ github.run_number }}
+      file: 9front-${{ matrix.arch }}.img
+      # Named the way image-builder's ninefront_release_file expects them
+      name: 9front-${{ matrix.release }}-${{ matrix.arch }}
+      release_artifact: 9front-release-${{ matrix.arch }}
+
+  # image-builder composes these images into its disk images as an optional
+  # 9front slot, fetched from the latest release
+  release:
+    needs: package
+    if: ${{ startsWith(github.ref, 'refs/tags/') }}
+    permissions:
+      contents: write
+    uses: bbusse/github-workflows/.github/workflows/release.yml@dev
+    with:
+      artifact_name: 9front-release
+      binary_name: 9front
+      release_branch: ci
+    secrets: inherit
