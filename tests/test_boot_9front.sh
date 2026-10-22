@@ -4,12 +4,19 @@
 # SPDX-License-Identifier: BSD-3-Clause
 #
 
-DISK_IMAGE="${DISK_IMAGE:-9front-amd64.img}"
+QEMU_ARCH="${QEMU_ARCH:-amd64}"
+DISK_IMAGE="${DISK_IMAGE:-9front-${QEMU_ARCH}.img}"
 BOOT_TIMEOUT="${BOOT_TIMEOUT:-300}"
 SHELL_TIMEOUT="${SHELL_TIMEOUT:-30}"
 BOOT_LOG_DIR="${BOOT_LOG_DIR:-}"
 
 WORK=""
+ROOT_DISK=sdE0
+SHELL_PROMPT='term% '
+if [ arm64 = "${QEMU_ARCH}" ]; then
+    ROOT_DISK=sdF0
+    SHELL_PROMPT='^% '
+fi
 
 # shellcheck source=lib/qemu.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../lib/qemu.sh"
@@ -34,7 +41,7 @@ setup_suite() {
 }
 
 test_01_image_boots_to_a_shell() {
-    assert "wait_for 'term% ' ${BOOT_TIMEOUT}" \
+    assert "wait_for '${SHELL_PROMPT}' ${BOOT_TIMEOUT}" \
         "the console should reach a shell prompt within ${BOOT_TIMEOUT}s"
 }
 
@@ -44,7 +51,7 @@ test_02_shell_runs_commands() {
 }
 
 test_03_root_is_gefs() {
-    assert "run_on_console 'fstype /dev/sdE0/fs | sed s/gefs/ROOT_IS_GEFS/' ROOT_IS_GEFS" \
+    assert "run_on_console 'fstype /dev/${ROOT_DISK}/fs | sed s/gefs/ROOT_IS_GEFS/' ROOT_IS_GEFS" \
         "the root file system should be gefs"
 }
 

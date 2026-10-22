@@ -8,9 +8,20 @@ QEMU_PID=""
 READER_PID=""
 SERIAL_LOG=""
 
+qemu_arch() {
+    echo "${QEMU_ARCH:-amd64}"
+}
+
+qemu_host_arch() {
+    case "$(qemu_arch)" in
+    amd64) echo x86_64 ;;
+    arm64) echo aarch64 ;;
+    esac
+}
+
 qemu_accel() {
     if [ "${QEMU_ACCEL:-kvm}" = kvm ] &&
-        [ "$(uname -m)" = x86_64 ] &&
+        [ "$(uname -m)" = "$(qemu_host_arch)" ] &&
         [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
         echo kvm
     else
@@ -25,6 +36,19 @@ ovmf_paths() {
     fi
 
     local pair
+    if [ arm64 = "$(qemu_arch)" ]; then
+        for pair in \
+            /usr/share/AAVMF/AAVMF_CODE.fd:/usr/share/AAVMF/AAVMF_VARS.fd \
+            /usr/share/edk2/aarch64/QEMU_EFI-pflash.raw:/usr/share/edk2/aarch64/vars-template-pflash.raw \
+            /usr/share/qemu/edk2-aarch64-code.fd:/usr/share/qemu/edk2-arm-vars.fd; do
+            if [ -f "${pair%%:*}" ] && [ -f "${pair##*:}" ]; then
+                echo "${pair%%:*} ${pair##*:}"
+                return 0
+            fi
+        done
+        return 1
+    fi
+
     for pair in \
         /usr/share/OVMF/OVMF_CODE_4M.fd:/usr/share/OVMF/OVMF_VARS_4M.fd \
         /usr/share/OVMF/OVMF_CODE.fd:/usr/share/OVMF/OVMF_VARS.fd \
@@ -53,6 +77,10 @@ qemu_disk() {
     snapshot) opts="${opts},snapshot=on" kind=hd ;;
     esac
 
+    if [ arm64 = "$(qemu_arch)" ]; then
+        printf '%s\n' -drive "${opts}" -device "virtio-blk-pci,disable-legacy=on,drive=disk${bus},bootindex=${bus}"
+        return 0
+    fi
     printf '%s\n' -drive "${opts}" -device "ide-${kind},drive=disk${bus},bus=ide.${bus},bootindex=${bus}"
 }
 
@@ -85,13 +113,23 @@ qemu_start() {
     local accel
     accel="$(qemu_accel)"
     local cpu
-    cpu=max
+    local machine
+    case "$(qemu_arch)" in
+    arm64)
+        cpu=cortex-a72
+        machine="virt,gic-version=3,highmem-ecam=off,accel=${accel}"
+        ;;
+    *)
+        cpu=max
+        machine="q35,accel=${accel}"
+        ;;
+    esac
     if [ kvm = "${accel}" ]; then
         cpu=host
     fi
 
-    qemu-system-x86_64 -nodefaults \
-        -machine "q35,accel=${accel}" -cpu "${cpu}" -smp 2 -m "${QEMU_MEM:-2048}" \
+    "qemu-system-$(qemu_host_arch)" -nodefaults \
+        -machine "${machine}" -cpu "${cpu}" -smp 2 -m "${QEMU_MEM:-2048}" \
         -display none -monitor none -no-reboot -nic none \
         -serial "pipe:${work}/serial" \
         -drive "if=pflash,format=raw,unit=0,file=${code},readonly=on" \

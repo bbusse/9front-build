@@ -1,0 +1,25 @@
+--- a/sys/src/9/arm64/l.s	2026-10-21 17:31:22
++++ b/sys/src/9/arm64/l.s	2026-10-21 17:31:23
+@@ -32,6 +32,22 @@
+ 	MOV	R2, SP
+ 
+ 	CBNZ	R1, _startup
++
++	/* plan9.ini from bootaa64.efi, unless R26 is nil or U-Boot's devicetree */
++	CBZ	R26, _noconf
++	MOVWU	(R26), R3
++	MOVW	$0xedfe0dd0, R4
++	CMPW	R3, R4
++	BEQ	_noconf
++	MOV	R26, R3
++	MOV	$(CONFADDR-KZERO), R4
++	MOV	$(CONFADDR-KZERO+0xdc0), R5
++_copyconf:
++	MOVBU	(R3)1!, R6
++	MOVB	R6, (R4)1!
++	CMP	R4, R5
++	BNE	_copyconf
++_noconf:
+ 
+ 	/* clear page table and machs */
+ 	MOV	$(L1BOT-KZERO), R1

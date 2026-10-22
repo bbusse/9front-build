@@ -9,18 +9,24 @@ set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/qemu.sh
 source "${here}/lib/qemu.sh"
+QEMU_ARCH=amd64
 
+arch="${ARCH:-amd64}"
 version="${NINEFRONT_VERSION:-11952}"
 iso_sha256="${NINEFRONT_ISO_SHA256:-59ba79f1304f02c1aae573b337fa2569fc78027ce8e4c2056c4117e971025b91}"
+arm64_qcow2_sha256="${NINEFRONT_ARM64_QCOW2_SHA256:-f5cfd763d14377d918ad8389b83dc4ab2b23ba48ccfabf3f75eae27e0c1b5a15}"
 repo_url="${NINEFRONT_REPO_URL:-https://9front.org/iso}"
 image_size_mib="${IMAGE_SIZE_MIB:-4096}"
 work="${WORK_DIR:-${PWD}/work}"
-out="${OUT:-${PWD}/9front-amd64.img}"
+out="${OUT:-${PWD}/9front-${arch}.img}"
 boot_timeout="${BOOT_TIMEOUT:-600}"
 build_timeout="${BUILD_TIMEOUT:-5400}"
 
 iso_gz="9front-${version}.amd64.iso.gz"
 iso="${work}/9front-${version}.amd64.iso"
+arm64_gz="9front-${version}.arm64.qcow2.gz"
+arm64_qcow2="${work}/9front-${version}.arm64.qcow2"
+arm64_dist="${work}/9front-${version}.arm64.raw"
 
 export MTOOLS_SKIP_CHECK=1
 
@@ -62,6 +68,47 @@ fetch_iso() {
     fi
 }
 
+fetch_arm64_dist() {
+    if [ ! -f "${arm64_qcow2}" ]; then
+        log "fetching ${repo_url}/${arm64_gz}"
+        curl -sS --fail -L -o "${work}/${arm64_gz}.part" "${repo_url}/${arm64_gz}"
+        gzip -d -c "${work}/${arm64_gz}.part" >"${arm64_qcow2}.part"
+        rm -f "${work}/${arm64_gz}.part"
+        mv "${arm64_qcow2}.part" "${arm64_qcow2}"
+    fi
+
+    log "verifying ${arm64_qcow2##*/}"
+    printf '%s  %s\n' "${arm64_qcow2_sha256}" "${arm64_qcow2##*/}" >"${arm64_qcow2}.sha256"
+    if ! (cd "${work}" && sha256sum -c --quiet "${arm64_qcow2##*/}.sha256"); then
+        die "checksum mismatch for ${arm64_qcow2##*/}, set NINEFRONT_ARM64_QCOW2_SHA256 along with NINEFRONT_VERSION"
+    fi
+
+    if [ ! -f "${arm64_dist}" ]; then
+        qemu-img convert -O raw "${arm64_qcow2}" "${arm64_dist}.part"
+        mv "${arm64_dist}.part" "${arm64_dist}"
+    fi
+}
+
+stage_arm64_patches() {
+    local patch
+    patch="${1}"
+    mkdir -p "${patch}"
+
+    xorriso -osirrox on -indev "${iso}" \
+        -extract /sys/src/9/arm64/l.s "${patch}/l.s" \
+        -extract /sys/src/9/arm64/bootargs.c "${patch}/bootargs.c" \
+        -extract /sys/src/boot/efi/sub.c "${patch}/sub.c" \
+        -extract /sys/src/boot/efi/aa64.s "${patch}/aa64.s" 2>/dev/null ||
+        die "found no arm64 kernel and EFI loader sources on ${iso}"
+    chmod u+w "${patch}"/*
+
+    local p
+    for p in "${here}"/patches/arm64/*.patch; do
+        log "applying ${p##*/}"
+        patch -s -p5 -d "${patch}" <"${p}" || die "${p##*/} does not apply"
+    done
+}
+
 make_boot_disk() {
     local stage
     stage="${work}/stage"
@@ -86,7 +133,11 @@ EOF
     esp="${work}/boot-esp.img"
     rm -f "${esp}"
     mkfs.vfat -C -n BUILD "${esp}" $((62 * 1024)) >/dev/null
-    mmd -i "${esp}" ::/EFI ::/EFI/BOOT ::/inst
+    mmd -i "${esp}" ::/EFI ::/EFI/BOOT ::/inst ::/patch
+    if [ arm64 = "${arch}" ]; then
+        stage_arm64_patches "${stage}/patch"
+        mcopy -i "${esp}" "${stage}/patch"/* ::/patch/
+    fi
     mcopy -i "${esp}" "${stage}/386/bootx64.efi" ::/EFI/BOOT/BOOTX64.EFI
     mcopy -i "${esp}" "${stage}/amd64/9pc64" ::/9pc64
     mcopy -i "${esp}" "${stage}/plan9.ini" ::/plan9.ini
@@ -117,6 +168,9 @@ run_install() {
     local disks=()
     mapfile -t -O "${#disks[@]}" disks < <(qemu_disk 0 "${boot_disk}")
     mapfile -t -O "${#disks[@]}" disks < <(qemu_disk 1 "${out}")
+    if [ arm64 = "${arch}" ]; then
+        mapfile -t -O "${#disks[@]}" disks < <(qemu_disk 2 "${arm64_dist}" snapshot)
+    fi
 
     log "booting the ${version} live system ($(qemu_accel))"
     qemu_start "${work}/qemu" "${disks[@]}"
@@ -130,7 +184,7 @@ run_install() {
     local from
     from="$(serial_size)"
     log "running inst/run.rc"
-    send_line 'test -e /srv/dos || dossrv; mount -c /srv/dos /n/build /dev/sdE0/esp && rc /n/build/inst/run.rc'
+    send_line "test -e /srv/dos || dossrv; mount -c /srv/dos /n/build /dev/sdE0/esp && rc /n/build/inst/run.rc ${arch}"
 
     if ! wait_for '9front-build: (done|FAILED)' "${build_timeout}" "${from}"; then
         show_console
@@ -158,9 +212,17 @@ check_image() {
     grep -q ' 3900 ' <<<"${table}" || die "${out} has no Plan 9 partition"
 }
 
+case "${arch}" in
+amd64) ;;
+arm64) need patch qemu-img ;;
+*) die "ARCH is amd64 or arm64, not ${arch}" ;;
+esac
 need curl sha256sum gzip xorriso mkfs.vfat mmd mcopy sgdisk truncate dd qemu-system-x86_64
 
 fetch_iso
+if [ arm64 = "${arch}" ]; then
+    fetch_arm64_dist
+fi
 make_boot_disk
 run_install
 check_image

@@ -4,7 +4,21 @@ rfork e
 
 build=/n/build/inst
 answers=$build/answers
-rootdisk=sdE0
+arch=amd64
+if(! ~ $#* 0)
+	arch=$1
+switch($arch){
+case amd64
+	rootdisk=sdE0
+	kernel=9pc64
+case arm64
+	rootdisk=sdF0
+	kernel=9qemu
+	distdisk=/dev/sdE2/fs
+case *
+	echo '9front-build: FAILED: unknown arch '^$arch
+	exit failed
+}
 steps=(configfs partdisk prepdisk mountfs mountdist copydist tzsetup bootsetup)
 
 fn fail {
@@ -14,7 +28,7 @@ fn fail {
 
 fn writeini {
 	{
-		echo 'bootfile=9pc64'
+		echo 'bootfile='^$kernel
 		echo 'bootargs=local!/dev/'^$rootdisk^'/fs '^$"fsflags
 		echo 'nobootprompt=local!/dev/'^$rootdisk^'/fs '^$"fsflags
 		echo 'console=0'
@@ -22,9 +36,48 @@ fn writeini {
 	} >/tmp/plan9.ini
 }
 
+fn buildarm64 {
+	hjfs -n dist64 -S -f $distdisk || fail hjfs on $distdisk
+	mount -c /srv/dist64 /n/dist64 || fail mount $distdisk
+	test -d /n/dist64/dist/9front || fail no distribution on $distdisk
+	test -f /n/dist64/arm64/lib/libc.a || fail no arm64 libc.a on $distdisk
+	bind /n/dist64/arm64 /arm64
+
+	mkdir -p /tmp/k /tmp/e
+	cp /n/build/patch/l.s /n/build/patch/bootargs.c /tmp/k/ || fail copy patched kernel sources
+	cp /n/build/patch/sub.c /n/build/patch/aa64.s /tmp/e/ || fail copy patched loader sources
+
+	echo '9front-build: building 9qemu'
+	bind -bc /tmp/k /sys/src/9/arm64
+	@{cd /sys/src/9/arm64 && objtype=arm64 mk 'CONF=qemu'} >/tmp/k.log >[2=1]
+	test -f /tmp/k/9qemu || { tail -20 /tmp/k.log; fail no 9qemu }
+
+	echo '9front-build: building bootaa64.efi'
+	bind -bc /tmp/e /sys/src/boot/efi
+	@{cd /sys/src/boot/efi && mk bootaa64.efi} >/tmp/e.log >[2=1]
+	test -f /tmp/e/bootaa64.efi || { tail -20 /tmp/e.log; fail no bootaa64.efi }
+}
+
+fn espsetup {
+	esp=$9fat
+	if(~ $#esp 0)
+		esp=`{basename -d $fs}^/esp
+	test -f $esp || fail no esp next to $fs
+	mount -c /srv/dos /n/9fat $esp || fail mount $esp
+	rm -f /n/9fat/9pc64 /n/9fat/efi/boot/bootx64.efi /n/9fat/efi/boot/bootia32.efi
+	cp /tmp/k/9qemu /n/9fat/9qemu || fail copy 9qemu
+	cp /tmp/e/bootaa64.efi /n/9fat/efi/boot/bootaa64.efi || fail copy bootaa64.efi
+	cp /tmp/plan9.ini /n/9fat/plan9.ini || fail copy plan9.ini
+	unmount /n/9fat
+	cp /tmp/k/9qemu /n/newfs/arm64/9qemu || fail copy 9qemu to /arm64
+}
+
 if(! syscall create /tmp/xxx 1 0666 >[2]/dev/null)
 	ramfs
 rm -f /tmp/xxx /tmp/vars /tmp/prompts.asked /tmp/prompt.failed /tmp/plan9.ini /tmp/copydone
+
+if(~ $arch arm64)
+	buildarm64
 
 cat /rc/bin/inst/defs $build/prompt.rc >/tmp/defs || fail cannot write /tmp/defs
 bind /tmp/defs /rc/bin/inst/defs || fail cannot bind /tmp/defs
@@ -59,6 +112,11 @@ for(s in $steps){
 	coherence
 	if(! ~ $$s done)
 		fail $s is $$s after go
+
+	if(~ $s mountdist && ~ $arch arm64)
+		bind /n/dist64 /n/dist
+	if(~ $s bootsetup && ~ $arch arm64)
+		espsetup
 }
 
 echo '9front-build: plan9.ini:'

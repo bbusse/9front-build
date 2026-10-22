@@ -1,0 +1,40 @@
+--- a/sys/src/boot/efi/sub.c	2026-10-21 17:50:06
++++ b/sys/src/boot/efi/sub.c	2026-10-21 18:04:02
+@@ -342,19 +342,25 @@
+ {
+ 	uchar *e, *d, *t;
+ 	ulong n;
++	uvlong mask;
++	uintptr align;
+ 	Exec ex;
+ 
+ 	if(readn(f, &ex, sizeof(ex)) != sizeof(ex))
+ 		return "bad header";
+ 
+ 	e = (uchar*)(beswal(ex.entry) & ~0xF0000000UL);
+-	switch(beswal(ex.magic)){
+-	case S_MAGIC:
++	mask = 0x0FFFFFFFULL;
++	align = BY2PG;
++	switch(beswal(ex.magic)){
+ 	case R_MAGIC:
++		mask = 0x7FFFFFFFULL;
++		align = 0x10000;
++	case S_MAGIC:
+ 		if(readn(f, &e, 8) != 8)
+ 			goto Error;
+ 		/* load low address */
+-		e = (uchar*)(beswall((uvlong)e) & 0x0FFFFFFFUL);
++		e = (uchar*)(beswall((uvlong)e) & mask);
+ 		break;
+ 	case I_MAGIC:
+ 		break;
+@@ -367,7 +373,7 @@
+ 	if(readn(f, t, n) != n)
+ 		goto Error;
+ 	t += n;
+-	d = (uchar*)PGROUND((uintptr)t);
++	d = (uchar*)(((uintptr)t + align-1) & ~(align-1));
+ 	memset(t, 0, d - t);
+ 	n = beswal(ex.data);
+ 	if(readn(f, d, n) != n)

@@ -1,0 +1,43 @@
+--- a/sys/src/9/arm64/bootargs.c	2026-10-21 17:31:22
++++ b/sys/src/9/arm64/bootargs.c	2026-10-21 17:31:23
+@@ -176,6 +176,31 @@
+ 	return  0;
+ }
+ 
++static void
++e820maxmem(void)
++{
++	uvlong top, end;
++	char *s, *e;
++	int i, t;
++
++	if((i = findconf("*e820")) < 0)
++		return;
++	top = 0;
++	for(s = confval[i]; *s != '\0'; s = e){
++		t = strtoul(s, &e, 16);
++		if(e == s)
++			break;
++		strtoull(e, &e, 16);
++		end = strtoull(e, &e, 16);
++		if(t == 1 && end > top)
++			top = end;
++	}
++	if(top != 0){
++		snprint(maxmem, sizeof(maxmem), "%#llux", top);
++		addconf("*maxmem", maxmem);
++	}
++}
++
+ void
+ bootargsinit(void)
+ {
+@@ -190,6 +215,8 @@
+ 			addconf("*ncpu", ncpu);
+ 		}
+ 	}
++	if(findconf("*maxmem") < 0)
++		e820maxmem();
+ }
+ 
+ char*
